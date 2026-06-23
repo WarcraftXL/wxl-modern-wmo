@@ -59,6 +59,13 @@ namespace
         return mwmo::iff::Rd32(raw.data() + mverLen);
     }
 
+    // FileDataID -> path adapter for the WMO translate: routes to the host resolver (the DB2 path tables a
+    // module registers). Cold; called once per unresolved material texture reference.
+    bool ResolveThunk(void* /*user*/, uint32_t fileDataId, std::string& outPath)
+    {
+        return wxl::host::ResolveFdid(fileDataId, outPath);
+    }
+
     bool TransformWmo(std::string_view name, std::span<const uint8_t> raw, std::vector<uint8_t>& out)
     {
         if (!EndsWithCI(name, ".wmo")) return false;
@@ -67,8 +74,8 @@ namespace
         if (second == mwmo::kMOHD)
         {
             wxl::core::log::Printf("modern-wmo root: %.*s", int(name.size()), name.data());
-            // Source WMOs name their textures directly (MOTX); a FileDataID-based source plugs a resolver here.
-            mwmo::ResolveCtx rc{};
+            // Source WMOs name their textures directly (MOTX); a FileDataID-based source resolves through here.
+            mwmo::ResolveCtx rc{ &ResolveThunk, nullptr };
             return mwmo::TranslateWmoRoot(raw, rc, out);
         }
         if (second == mwmo::kMOGP)
