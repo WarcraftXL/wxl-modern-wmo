@@ -137,14 +137,16 @@ namespace wxl::modern::wmo
         const uint32_t size = static_cast<uint32_t>(in.size());
         const iff::Reader reader(in);
 
-        // Pass 1: locate MOTX/MOMT, detect source markers and any non-keep chunk.
-        iff::Chunk motxC{}, momtC{};
+        // Pass 1: locate MOTX/MOMT, the doodad name/FileDataID/def chunks, source markers, non-keep chunk.
+        iff::Chunk motxC{}, momtC{}, modiC{}, moddC{};
         bool modern = false, strippedUnknown = false;
         reader.ForEach([&](const iff::Chunk& c)
         {
             if (IsRootModernMarker(c.magic)) modern = true;
-            else if (c.magic == kMOTX)       motxC = c;
+            if (c.magic == kMOTX)            motxC = c;
             else if (c.magic == kMOMT)       momtC = c;
+            else if (c.magic == kMODI)       modiC = c;
+            else if (c.magic == kMODD)       moddC = c;
             if (!IsRootKeepChunk(c.magic))   strippedUnknown = true;
             return true;
         });
@@ -237,6 +239,45 @@ namespace wxl::modern::wmo
                 matCount, collapsedShaders, dbgShader, dbgPath[0].c_str(), dbgPath[1].c_str());
         }
 
+        // Doodad FileDataID -> name. Retail WMOs reference their doodad models by FileDataID (MODI) with an
+        // EMPTY MODN, and each MODD def's name index points into MODI, not MODN. The Client only reads names
+        // from MODN, so resolve every MODI FileDataID to a path, rebuild MODN, and remap each MODD def's name
+        // index to that path's byte offset. Without it the doodads have no model
+        constexpr uint32_t kModdStride = 0x28;
+        MotxBuilder modn;
+        std::vector<uint8_t> modd;
+        bool rebuiltDoodads = false;
+        if (modiC.data && moddC.data && moddC.size >= kModdStride)
+        {
+            modn.data.push_back(0); // offset 0 = empty name; unresolved doodads load nothing
+            const uint32_t nModi = modiC.size / 4;
+            std::vector<uint32_t> nameOff(nModi, 0);
+            uint32_t resolved = 0;
+            for (uint32_t k = 0; k < nModi; ++k)
+            {
+                const uint32_t fdid = Rd32(modiC.data + k * 4);
+                std::string path;
+                if (fdid && rc.resolve && rc.resolve(rc.user, fdid, path) && !path.empty())
+                {
+                    nameOff[k] = modn.Append(path.c_str());
+                    ++resolved;
+                }
+            }
+            modd.assign(moddC.data, moddC.data + moddC.size);
+            const uint32_t nDefs = moddC.size / kModdStride;
+            for (uint32_t i = 0; i < nDefs; ++i)
+            {
+                uint8_t* e = modd.data() + i * kModdStride;
+                const uint32_t v   = Rd32(e);
+                const uint32_t idx = v & 0x00FFFFFFu;   // modern: index into MODI
+                const uint32_t off = (idx < nModi) ? nameOff[idx] : 0;
+                Wr32(e, (v & 0xFF000000u) | (off & 0x00FFFFFFu)); // keep doodad flags (high byte)
+            }
+            rebuiltDoodads = true;
+            wxl::core::log::Printf("wmo-doodad: MODI %u (resolved %u) -> MODN names, %u defs (blob %u B)",
+                nModi, resolved, nDefs, uint32_t(modn.data.size()));
+        }
+
         // A MOTX must always exist (loader base pointer); an empty blob still needs one NUL.
         if (motx.data.empty())
             motx.data.push_back(0);
@@ -260,10 +301,6 @@ namespace wxl::modern::wmo
             if (magic == kMOMT) { iff::Emit(out, kMOMT, mats.data(), static_cast<uint32_t>(mats.size())); continue; }
             if (magic == kMOHD)
             {
-                // Clear the header flag (0x8) that tells the Client to SKIP the vertex-color fix. A modern
-                // source sets it (its shader path needs no fix), but the Client's fixed-function path leaves
-                // the raw vertex colors as-is -> groups whose colors are stored bright (white) render
-                // over-bright. Clearing it lets the Client run its color fix so those groups shade correctly.
                 iff::Chunk c{};
                 if (reader.Find(kMOHD, c) && c.size >= 0x3E)
                 {
@@ -275,6 +312,8 @@ namespace wxl::modern::wmo
                 else             iff::Emit(out, kMOHD, nullptr, 0);
                 continue;
             }
+            if (rebuiltDoodads && magic == kMODN) { iff::Emit(out, kMODN, modn.data.data(), static_cast<uint32_t>(modn.data.size())); continue; }
+            if (rebuiltDoodads && magic == kMODD) { iff::Emit(out, kMODD, modd.data(), static_cast<uint32_t>(modd.size())); continue; }
             iff::Chunk c{};
             if (reader.Find(magic, c)) iff::Emit(out, magic, c.data, c.size);
             else                       iff::Emit(out, magic, nullptr, 0);
