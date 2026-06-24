@@ -258,6 +258,23 @@ namespace wxl::modern::wmo
         {
             if (magic == kMOTX) { iff::Emit(out, kMOTX, motx.data.data(), static_cast<uint32_t>(motx.data.size())); continue; }
             if (magic == kMOMT) { iff::Emit(out, kMOMT, mats.data(), static_cast<uint32_t>(mats.size())); continue; }
+            if (magic == kMOHD)
+            {
+                // Clear the header flag (0x8) that tells the Client to SKIP the vertex-color fix. A modern
+                // source sets it (its shader path needs no fix), but the Client's fixed-function path leaves
+                // the raw vertex colors as-is -> groups whose colors are stored bright (white) render
+                // over-bright. Clearing it lets the Client run its color fix so those groups shade correctly.
+                iff::Chunk c{};
+                if (reader.Find(kMOHD, c) && c.size >= 0x3E)
+                {
+                    std::vector<uint8_t> mohd(c.data, c.data + c.size);
+                    Wr16(mohd.data() + 0x3C, uint16_t(Rd16(mohd.data() + 0x3C) & ~uint16_t(0x8)));
+                    iff::Emit(out, kMOHD, mohd.data(), static_cast<uint32_t>(mohd.size()));
+                }
+                else if (c.data) iff::Emit(out, kMOHD, c.data, c.size);
+                else             iff::Emit(out, kMOHD, nullptr, 0);
+                continue;
+            }
             iff::Chunk c{};
             if (reader.Find(magic, c)) iff::Emit(out, magic, c.data, c.size);
             else                       iff::Emit(out, magic, nullptr, 0);
@@ -392,7 +409,19 @@ namespace wxl::modern::wmo
         if (hasMODR) iff::EmitRaw(subRegion, modr);
         if (hasMOBN) iff::EmitRaw(subRegion, mobn);
         if (hasMOBR) iff::EmitRaw(subRegion, mobr);
-        if (hasMOCV) iff::EmitRaw(subRegion, mocv);
+        if (hasMOCV)
+        {
+            // A modern source leaves some exterior groups' vertex colors at a near-white placeholder (its
+            // shader path needs no baked lighting), while the groups that shade correctly carry near-black
+            // colors. The Client multiplies the surface by the vertex color, so a near-white group renders
+            // over-bright. Neutralize a near-white entry to black so it shades from the ambient/scene light
+            // like the correct groups; meaningful (darker) colors are left untouched.
+            std::vector<uint8_t> cv(mocv.data, mocv.data + mocv.size);
+            for (uint32_t v = 0; v + 4 <= cv.size(); v += 4)
+                if (cv[v] >= 220 && cv[v + 1] >= 220 && cv[v + 2] >= 220)
+                    { cv[v] = 0; cv[v + 1] = 0; cv[v + 2] = 0; }
+            iff::Emit(subRegion, kMOCV, cv.data(), static_cast<uint32_t>(cv.size()));
+        }
         if (hasMLIQ) iff::EmitRaw(subRegion, mliq);
 
         // Native two-layer (shader 6) needs a 2nd texcoord + 2nd color set: the 2nd MOCV's alpha blends the
