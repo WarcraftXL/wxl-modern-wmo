@@ -42,6 +42,30 @@ namespace wxl::modern::wmo
             return (shader <= kMaxNativeShader) ? shader : 0;
         }
 
+        // Group liquid id -> Client. The Client indexes LiquidType with this value directly (no arithmetic),
+        // then reads that row's material without a null guard, so an id that resolves a LiquidType row but
+        // has no Client material faults the liquid pass. Keep the Client-native ids (1..21), fold known
+        // modern ids onto the matching Client category, and send anything else to still water. Mirrors the
+        // terrain liquid remap (same id space).
+        uint32_t MapWmoLiquidType(uint32_t id)
+        {
+            switch (id)
+            {
+                case 101: case 321: case 324: case 350: case 412:
+                case 868: case 890: case 891: case 896:
+                    return 2;  // ocean
+                case 121: case 141: case 302: case 303: case 397: case 404:
+                case 671: case 739: case 859: case 860: case 869: case 870:
+                case 873: case 874: case 875: case 876: case 877: case 878: case 879:
+                    return 7;  // lava
+                case 586:
+                    return 4;  // slime
+                default:
+                    break;
+            }
+            return (id >= 1 && id <= 21) ? id : 5u;  // water
+        }
+
         // Growable MOTX blob: appends NUL-terminated texture names, dedups, returns the byte offset.
         struct MotxBuilder
         {
@@ -502,6 +526,20 @@ namespace wxl::modern::wmo
         if (emitMOCV2) newFlags |= kGrpFlagMOCV2;
         Wr32(outMogpData + kMogpFlagsOffset, newFlags);
 
+        // Remap the liquid id to one the Client can fully resolve. Only groups that carry liquid feed the
+        // liquid pass, so leave the field untouched otherwise.
+        bool liquidRemapped = false;
+        if (hasMLIQ)
+        {
+            const uint32_t rawLiquid  = Rd32(outMogpData + kMogpGroupLiquidOffset);
+            const uint32_t safeLiquid = MapWmoLiquidType(rawLiquid);
+            if (safeLiquid != rawLiquid)
+            {
+                Wr32(outMogpData + kMogpGroupLiquidOffset, safeLiquid);
+                liquidRemapped = true;
+            }
+        }
+
         // Injected empty MOBA means zero batches; zero the header counts to match.
         if (injMOBA)
         {
@@ -518,7 +556,7 @@ namespace wxl::modern::wmo
         // No-op: nothing injected, no flag change, region byte-identical to the source span.
         const bool injected = injMOPY || injMOVI || injMOVT || injMONR || injMOTV || injMOBA;
         const uint32_t origSubLen = mogpEnd - subStart;
-        if (!injected && newFlags == oldFlags &&
+        if (!injected && !liquidRemapped && newFlags == oldFlags &&
             subRegion.size() == origSubLen && memcmp(subRegion.data(), buf + subStart, origSubLen) == 0)
             return false;
 

@@ -99,6 +99,9 @@ namespace wxl::modern::wmo
     constexpr uint32_t kMogpIntBatchCountOffset   = 0x2A;
     constexpr uint32_t kMogpExtBatchCountOffset   = 0x2C;
 
+    // Liquid type id inside the MOGP fixed header (u32). The Client uses it as a LiquidType index.
+    constexpr uint32_t kMogpGroupLiquidOffset = 0x34;
+
     // Group flag bit marking an exterior (outdoor-lit) group; not a gated chunk flag.
     constexpr uint32_t kGrpFlagExterior = 0x8;
 
